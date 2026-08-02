@@ -42,10 +42,7 @@ get_dr_func <- function(modelname, a, b, c, d) {
   
 }
 
-#x = line_x
-#y = line_y
-#xaxis_value="Concentration"
-#yaxis_value = "Response"
+
 plot_DR_curve <- function(x, y, a, b, c, d,BMD, modelname, 
                           datapoints_x, datapoints_y, xaxis_value="Concentration",
                           yaxis_value = "Response") {
@@ -432,6 +429,231 @@ shorten_cell_types <- function(df, cell_col = "Cell_type") {
         str_detect(.data[[cell_col]], regex("Hepa 1-6", ignore_case = TRUE)) ~ "Hepa 1-6",
         TRUE ~ .data[[cell_col]]  # fallback: retain full string
       )
+    )
+}
+
+library(tidyverse)
+library(scales)
+
+# =============================================================================
+# MAIN TEXT — Option 5: Strip + shaded IQR band
+# Shows individual experiment points jittered over a shaded IQR band per group
+# =============================================================================
+
+plot_ecx_human_main <- function(df,
+                                ec_prefix = "ec10",
+                                np_col    = "NP",
+                                cell_col  = "Cell_type",
+                                exp_col   = "general_experiment_type",
+                                min_n     = 3) {
+  
+  # Column names
+  ec_med  <- paste0(ec_prefix, "_median")
+  ec_q5   <- paste0(ec_prefix, "_q5")
+  ec_q25  <- paste0(ec_prefix, "_q25")
+  ec_q75  <- paste0(ec_prefix, "_q75")
+  ec_q95  <- paste0(ec_prefix, "_q95")
+  
+  # --- Build combo label (NP | cell type) and order by group median ---
+  # Ordering uses ALL groups, regardless of n
+  df_plot <- df %>%
+    mutate(combo_label = paste(.data[[np_col]], .data[[cell_col]], sep = " | ")) %>%
+    mutate(
+      combo_label = fct_reorder(combo_label, .data[[ec_med]],
+                                .fun = median, .na_rm = TRUE)
+    )
+  
+  # --- Subset used for boxes only: groups with n >= min_n non-missing values ---
+  df_box <- df_plot %>%
+    group_by(combo_label) %>%
+    filter(sum(!is.na(.data[[ec_med]])) >= min_n) %>%
+    ungroup()
+  
+  ggplot() +
+    # Layer 1: Box-whisker plot, only for groups with n >= min_n
+    geom_boxplot(
+      data = df_box,
+      aes(x = .data[[ec_med]], y = combo_label),
+      fill = "#F0EBE1", alpha = 1, color = "gray40",
+      outlier.shape = NA, width = 0.5, linewidth = 0.4
+    ) +
+    # Layer 2: Individual experiment medians for ALL groups
+    geom_point(
+      data = df_plot,
+      aes(x = .data[[ec_med]], y = combo_label,
+          fill = .data[[exp_col]]),
+      shape = 21, size = 2.5, stroke = 0.8, color = "black",
+      position = position_jitter(width = 0, height = 0.15, seed = 42)
+    ) +
+    scale_fill_manual(name = "Experiment type",
+                      values = c("Cytokine"              = "#BF5A2D",
+                                 "Cytotoxicity"          = "#8BAFCD",
+                                 "Genotoxicity"          = "#6C3687",
+                                 "Metabolic Cell Stress" = "#DAB039")) +
+    scale_y_discrete(drop = FALSE) +
+    scale_x_log10(
+      labels = label_scientific(digits = 1),
+      limits = c(1e-3, 1e4),
+      breaks = 10^(-3:4)
+    ) +
+    labs(
+      x = bquote(bolditalic("In vitro") ~
+                   bold(BMD[.(gsub("ec", "", ec_prefix))] ~ "(" * mu * "g/mL)")),
+      y = "NP core | cell type"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.text.y    = element_text(size = 11, color = "black"),
+      axis.text.x    = element_text(size = 11, color = "black"),
+      axis.title.x   = element_text(size = 12, face = "bold"),
+      axis.title.y   = element_text(size = 12, face = "bold"),
+      panel.grid.major.x = element_line(color = "gray85", linetype = "dashed"),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor   = element_blank(),
+      legend.position      = c(0.01, 0.99),
+      legend.justification = c(0, 1),
+      legend.title         = element_text(size = 11, face = "bold"),
+      legend.text          = element_text(size = 10),
+      legend.box.background = element_rect(color = "black", linewidth = 0.5),
+      panel.border     = element_rect(color = "black", fill = NA, linewidth = 1),
+      panel.background = element_rect(fill = "white", color = NA)
+    )
+}
+
+
+# =============================================================================
+# SUPPORTING INFORMATION — Option 2: Faceted interval plot
+# One panel per nanoparticle, each experiment on its own row with full CI
+# =============================================================================
+
+plot_ecx_human_si <- function(df,
+                              ec_prefix = "ec10",
+                              np_col    = "NP",
+                              cell_col  = "Cell_type",
+                              exp_col   = "general_experiment_type",
+                              id_col    = NULL,
+                              size_col  = NULL,
+                              time_col  = NULL,
+                              study_col = "study") {
+  
+  # Column names
+  ec_med  <- paste0(ec_prefix, "_median")
+  ec_q5   <- paste0(ec_prefix, "_q5")
+  ec_q25  <- paste0(ec_prefix, "_q25")
+  ec_q75  <- paste0(ec_prefix, "_q75")
+  ec_q95  <- paste0(ec_prefix, "_q95")
+  
+  # --- Build facet label (NP | cell type) ---
+  df_plot <- df %>%
+    mutate(
+      facet_label = paste(.data[[np_col]], .data[[cell_col]], sep = " | ")
+    )
+
+  # --- Build row label with remaining metadata (size, time, study) ---
+  df_plot <- df_plot %>%
+    mutate(row_label = paste0(.data[["experiment_type"]], " No.", .data[[study_col]]))
+  
+  # Append particle size if column exists
+  if (!is.null(size_col) && size_col %in% names(df)) {
+    df_plot <- df_plot %>%
+      mutate(row_label = paste0(row_label, " | ", round(.data[[size_col]]), " nm"))
+  }
+  
+  # Append exposure time if column exists
+  if (!is.null(time_col) && time_col %in% names(df)) {
+    df_plot <- df_plot %>%
+      mutate(row_label = paste0(row_label, " | ", .data[[time_col]], "h"))
+  }
+  
+  # Append experiment ID if available (for uniqueness)
+  if (!is.null(id_col) && id_col %in% names(df)) {
+    df_plot <- df_plot %>%
+      mutate(row_label = paste0(row_label, " (", .data[[id_col]], ")"))
+  }
+  
+  # Deduplicate labels if needed and order by median BMD10
+  df_plot <- df_plot %>%
+    mutate(
+      row_label = make.unique(row_label, sep = " "),
+      row_label = fct_reorder(row_label, .data[[ec_med]], .na_rm = TRUE)
+    )
+  
+  # --- Compute summary stats per facet panel for background boxplot ---
+  facet_summary <- df_plot %>%
+    group_by(facet_label) %>%
+    summarise(
+      box_med   = median(.data[[ec_med]], na.rm = TRUE),
+      box_q25   = quantile(.data[[ec_med]], 0.25, na.rm = TRUE),
+      box_q75   = quantile(.data[[ec_med]], 0.75, na.rm = TRUE),
+      box_lower = max(min(.data[[ec_med]], na.rm = TRUE),
+                      quantile(.data[[ec_med]], 0.25, na.rm = TRUE) -
+                        1.5 * IQR(.data[[ec_med]], na.rm = TRUE)),
+      box_upper = min(max(.data[[ec_med]], na.rm = TRUE),
+                      quantile(.data[[ec_med]], 0.75, na.rm = TRUE) +
+                        1.5 * IQR(.data[[ec_med]], na.rm = TRUE)),
+      .groups = "drop"
+    )
+  
+  ggplot(df_plot, aes(y = row_label)) +
+    geom_vline(
+      data = facet_summary,
+      aes(xintercept = box_lower),
+      color = "gray70", linewidth = 0.3, linetype = "dotted"
+    ) +
+    geom_vline(
+      data = facet_summary,
+      aes(xintercept = box_upper),
+      color = "gray70", linewidth = 0.3, linetype = "dotted"
+    ) +
+    geom_boxplot(
+      aes(y      = row_label,
+          xmin    = .data[[ec_q5]],
+          xlower  = .data[[ec_q25]],
+          xmiddle = .data[[ec_med]],
+          xupper  = .data[[ec_q75]],
+          xmax    = .data[[ec_q95]],
+          fill    = .data[[exp_col]]),
+      stat = "identity",
+      color = "gray40",
+      width = 0.6, linewidth = 0.4
+    ) +
+    facet_wrap(
+      ~ facet_label,
+      scales = "free_y",
+      ncol   = 2
+    ) +
+    scale_fill_manual(name = "Experiment type",
+                      values = c( "Cytokine"= "#BF5A2D",
+                                            "Cytotoxicity"= "#8BAFCD", 
+                                            "Genotoxicity"="#6C3687",
+                                            "Metabolic Cell Stress"="#DAB039")) +
+    scale_x_log10(
+      labels = label_scientific(digits = 1),
+      limits = c(1e-3, 1e4),
+      breaks = 10^(-3:4)
+    ) +
+    labs(
+      x = bquote(bolditalic("In vitro") ~
+                   bold(BMD[.(gsub("ec", "", ec_prefix))] ~ "(" * mu * "g/mL)")),
+      y = NULL
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      axis.text.y    = element_text(size = 8, color = "black"),
+      axis.text.x    = element_text(size = 9, color = "black"),
+      axis.title.x   = element_text(size = 11, face = "bold"),
+      strip.text      = element_text(size = 11, face = "bold"),
+      strip.background = element_rect(fill = "gray95", color = "gray70",
+                                      linewidth = 0.5),
+      panel.grid.major.x = element_line(color = "gray85", linetype = "dashed"),
+      panel.grid.major.y = element_line(color = "gray92", linewidth = 0.3),
+      panel.grid.minor   = element_blank(),
+      legend.position = "bottom",
+      legend.title    = element_text(size = 10, face = "bold"),
+      legend.text     = element_text(size = 9),
+      panel.border     = element_rect(color = "gray50", fill = NA, linewidth = 0.5),
+      panel.background = element_rect(fill = "white", color = NA),
+      panel.spacing    = unit(1, "lines")
     )
 }
 
