@@ -1,6 +1,8 @@
-# this function will first read the collected in vitro dose response data, and then clean
-# the data set, making them the right format for next processing step 
-# (single one by one experiment record)
+# PURPOSE: Reads the raw in vitro nanoparticle toxicity data compiled from the
+#          literature and reshapes it into the standardised format required by
+#          the downstream dose-response modelling step, i.e. one row/record per
+#          single experiment.
+# Author: Jimeng Wu | Created: 2026-04
 
 # Load necessary libraries
 library(readxl)  # for reading Excel files
@@ -14,11 +16,15 @@ library(proast71.1)
 # -------------- 0. Read the Excel file ------------
 # human liver cell data
 liver_results <- read_excel("/Users/wuji/work/code/codo_v2/calculation_in_vitro/human/processed_human_liver_0716.xlsx")
+liver_results <- liver_results[, 1:25] # remove all NAN columns
+liver_results[,"sample_size"] = 100 # assign sample size for the cyto toxicity results 
 outputfile = "results_undissolved/human/ls_sub_case_human.RData"
 proast_folder = "/Users/mmm/work/code/codo_v2/R/results_undissolved/human/bmd_results_undissolved/"
 
 # mouse liver cell data 
 liver_results <- read_excel("/Users/wuji/work/code/codo_v2/calculation_in_vitro/mouse/processed_mouse.xlsx")
+liver_results <- liver_results[, 1:34] # remove all NAN columns
+liver_results[,"sample_size"] = 100 # assign sample size for the cyto toxicity results calculation inside the proast software
 outputfile = "results_undissolved/mouse/ls_sub_case_mouse.RData"
 proast_folder = "/Users/mmm/work/code/codo_v2/R/results_undissolved/mouse/bmd_results_undissolved/"
 
@@ -101,8 +107,6 @@ print(nrow(liver_results))  # Print the number of remaining rows
 
 
 
-
-
 # -------------- 1. split the raw database into the format as list with single experiment record one by one ------------
 # Initialize the list to hold subsets
 ls_sub_case <- list()  
@@ -143,7 +147,7 @@ for (i in unique(liver_results$Study_ID)) {
   split_cases <- split(case, list(case$Study_ID,case$`Substance core`, 
                                   case$`Tested assay`,case$`Cell type`,
                                   case$`Average size (nm)`,
-                                 case$`Specific surface area (m2/g)`, # this is for mouse in vitro data, in study 7 two Tio2 has the same diameter but different ssa
+                                 #case$`Specific surface area (m2/g)`, # this is for mouse in vitro data, in study 7 two Tio2 has the same diameter but different ssa
                                   case$`In vitro media`,case$`In vitro exposure time[h]`))
   
   # Convert each element in split_cases to a standard data frame
@@ -212,3 +216,88 @@ dir.create(dirname(outputfile), recursive = TRUE, showWarnings = FALSE)
 
 save(ls_sub_case, file = outputfile)
 
+# detection of monotically increased input in vitro concentration
+# Let's say your list of dataframes is called `df_list`
+# And each dataframe has a column named exactly "In vitro concentration"
+
+check_monotonic <- function(df_list) {
+  sapply(df_list, function(df) {
+    conc <- df[["In vitro concentration"]]
+    all(diff(conc) >= 0)  # TRUE if monotonic increasing
+  })
+}
+
+bad_ones <- which(!check_monotonic(ls_sub_case))
+
+
+
+#------------ B. for mouse in vivo data ----------
+
+# -------------- 0. Read the Excel file ------------
+mouse_vivo_results <- read_excel("~/work/code/codo_v2/data/mouse_invivo.xlsx")
+outputfile = "results_undissolved/mouse/ls_sub_case_mouse_vivo.RData"
+proast_folder = "/Users/mmm/work/code/codo_v2/bmd_results_mouse_vivo/"
+
+
+
+#----split the experiment record into single experiment one by one-----
+# Initialize the list to hold subsets
+ls_sub_case_mouse_vivo <- list()  
+
+# Loop over unique Study_IDs
+for (i in unique(mouse_vivo_results$Study_id)[-1]) {
+  
+  # Filter by Study_ID
+  case <- mouse_vivo_results[mouse_vivo_results$Study_id == i, ]
+  
+  # Skip cases where all Raw Results are NA
+  if (all(is.na(case$`Raw Results`))) next
+
+  # Split the data by unique combinations of specified columns
+  split_cases <- split(case, list(case$`experiment type`), drop = TRUE)  # drop=TRUE removes empty factor combinations
+
+  # Apply a function to each subset
+  processed_sub_cases <- lapply(split_cases, function(sub_case) {
+    
+    # Remove rows where 'Raw Results' is NA
+    sub_case <- sub_case[!is.na(sub_case$`Raw Results`), ]
+    
+    # Only process if there are rows left
+    if (nrow(sub_case) > 0) {
+      
+      # Convert 'Raw Results' to numeric
+      sub_case$`Raw Results` <- as.numeric(sub_case$`Raw Results`)
+      
+      # Return the processed sub_case
+      return(sub_case)
+    }
+    
+    # Return NULL for empty or invalid cases
+    return(NULL)
+  })
+  
+  # Remove NULL entries from the processed_sub_cases
+  processed_sub_cases <- Filter(Negate(is.null), unname(processed_sub_cases))
+  
+  # Append the non-null cases to ls_sub_case_mouse_vivo
+  if (length(processed_sub_cases) > 0) {
+    ls_sub_case_mouse_vivo <- append(ls_sub_case_mouse_vivo, processed_sub_cases)
+  }
+  
+}
+
+for (i in 1:length(ls_sub_case_mouse_vivo)){
+  print(i)
+  temp = ls_sub_case_mouse_vivo[[i]]
+  temp = bind_rows(temp)
+  combined_unique_values <- c(unique(temp$Study_id),unique(temp$`Substance name`),unique(temp$`experiment type`))
+  combined_string <- paste(combined_unique_values, collapse = "_")
+  
+  safe_combined_string <- gsub("[^[:alnum:]_-]", "_", combined_string)
+  print(combined_string)
+  combined_file = paste0(proast_folder,safe_combined_string,".RData")
+  ls_sub_case_mouse_vivo[[i]]$file = combined_file
+  print(combined_file)
+}
+
+save(ls_sub_case_mouse_vivo, file = outputfile)

@@ -1,3 +1,32 @@
+# ==============================================================================
+#
+# TITLE:   Dose-response curve fitting for cytotoxicity experiments
+#
+# PURPOSE: Takes the cleaned, per-experiment in vitro data and fits dose-response
+#          curves for the cytotoxicity endpoint class, covering cell viability
+#          assays (MTT, Alamar Blue, EZ-Cytox, MTS, WST-1, Trypan Blue, NRU,
+#          ATP, CCK8) and the membrane integrity assay (LDH).
+#          These endpoints have a biologically interpretable response range
+#          (100% viability -> 0%), so a three-parameter Hill function with a
+#          fixed upper asymptote is used:
+#
+#              y = a + (1 - a) * x^d / (b^d + x^d)
+#
+#          where x = nanoparticle dose, y = normalized viability, a = baseline
+#          viability, b = half-maximal dose, d = slope; maximum fixed at 1.
+#          LDH is handled on the inverse (% cytotoxicity) scale.
+#          Fitting is Bayesian (MCMC in R); convergence checked via R-hat < 1.2.
+#          BMD10 (10% change from the negative control) is extracted per
+#          experiment together with its credible interval.
+#
+# INPUT:   <cleaned per-experiment data set from 01_read_clean_invitro_data.R>
+# OUTPUT:  <fitted model objects / BMD10 table + dose-response curve plots>
+#
+# AUTHOR:  Jimeng Wu          CREATED: 2026-04        
+# ==============================================================================
+
+
+
 library(posterior)
 library(purrr)
 library(cmdstanr)
@@ -126,6 +155,7 @@ model <- cmdstan_model("with_stan/hill_single.stan")
 load("/Users/wuji/work/code/codo_v2/R/results_undissolved/mouse/ls_sub_case_mouse.RData")
 outputdir = "results_undissolved/mouse/plots/bmd_mouse_cyto_stan"
 stanoutdir = "/Users/wuji/work/code/codo_v2/R/results_undissolved/mouse/stan_results/bmd_mouse_cyto_stan"
+plot_title_begin="Cytotoxicity"
 
 # human cyto toxicity dataset
 load("/Users/wuji/work/code/codo_v2/R/results_undissolved/human/ls_sub_case_human.RData")
@@ -152,9 +182,9 @@ ec5_draws_all <- list()
 ec10_draws_all <- list()
 param_draws_all <- list()
 r_squared_df <- list()
+all_diagnostics <- vector("list", length(ls_bmd_cyto))
 
 for (i in seq_along(ls_bmd_cyto)) {
-
   percent <- round(100 * i / length(ls_bmd_cyto))
   cat(sprintf("\rProgress: %3d%%", percent))
   flush.console()
@@ -165,12 +195,15 @@ for (i in seq_along(ls_bmd_cyto)) {
   obs_df <- data.frame(x = x_obs, y = y_obs)
   obs_df
   
-  # fit the model and then save the results 
-  fit <- fit_hill_model(x_obs, y_obs, model) # Fit model
-  fit$save_object(file = file.path(stanoutdir, sprintf("cyto_study_%d.rds", i)))   # Save a single object
-
+  #  1. fit the model and then save the results 
+  #fit <- fit_hill_model(x_obs, y_obs, model) # Fit model
+  #fit$save_object(file = file.path(stanoutdir, sprintf("cyto_study_%d.rds", i)))   # Save a single object
+  # 2. read the saved model fitting results
+  fit <- readRDS(file.path(stanoutdir, sprintf("cyto_study_%d.rds", i)))
+  
   
   # Summarize results
+  #summary_pars <- fit$summary(c("a", "b", "d", "sigma", "ec5","ec10"))
   draws_df <- posterior::as_draws_df(fit$draws())
   
   summary_pars <- summarise_draws(
@@ -196,7 +229,7 @@ for (i in seq_along(ls_bmd_cyto)) {
   x_seq <- exp(seq(log(if (min(x_obs) > 0) x_lower else 1e-6), log(x_upper), length.out = 500))
   
   ribbon_df <- generate_pred_curves(draws_df, x_seq)
-  p <- plot_hill_curve(ribbon_df, obs_df, i, x_lower, x_upper, 
+  p <- plot_hill_curve(ribbon_df, ls_bmd_cyto, obs_df, i, x_lower, x_upper, 
                        median_ec10,ec10_ci_50[1],ec10_ci_50[2],
                        ec10_ci_95[1],ec10_ci_95[2],0,1,"Cytotoxicity (%)")
   
@@ -206,8 +239,7 @@ for (i in seq_along(ls_bmd_cyto)) {
        plot = p, width = 8, height = 5,device = cairo_pdf)
   
   # After sampling and summarizing
-  check_diagnostics(fit, study_index = i)
-  save_traceplot(fit, study_index = i,outputdir)
+  all_diagnostics[[i]] <- check_diagnostics(fit, study_index = i)
   
   ec5_draws_all[[i]] <- data.frame(
     study = paste0("Study_", i),
@@ -269,20 +301,26 @@ for (i in seq_along(ls_bmd_cyto)) {
   
   
 }
+diagnostics_df <- do.call(rbind, all_diagnostics)
 
 # for mouse
-save(param_draws_all, file = file.path(stanoutdir,"cyto_mouse_param_draws_all.RData"))
-save(ec5_draws_all, file = file.path(stanoutdir,"cyto_mouse_ec5_draws_all.RData"))
-save(ec10_draws_all, file = file.path(stanoutdir,"cyto_mouse_ec10_draws_all.RData"))
-save(results, file = file.path(stanoutdir,"cyto_mouse_results_summary.RData"))
-save(r_squared_df, file = file.path(stanoutdir,"cyto_mouse_r_square.RData"))
+#save(param_draws_all, file = file.path(stanoutdir,"cyto_mouse_param_draws_all.RData"))
+#save(ec5_draws_all, file = file.path(stanoutdir,"cyto_mouse_ec5_draws_all.RData"))
+#save(ec10_draws_all, file = file.path(stanoutdir,"cyto_mouse_ec10_draws_all.RData"))
+#save(results, file = file.path(stanoutdir,"cyto_mouse_results_summary.RData"))
+#save(r_squared_df, file = file.path(stanoutdir,"cyto_mouse_r_square.RData"))
+
+save(diagnostics_df, file = file.path(stanoutdir,"cyto_mouse_diagnostics.RData"))
 
 # for human
-save(param_draws_all, file = file.path(stanoutdir,"cyto_human_param_draws_all.RData"))
-save(ec5_draws_all, file = file.path(stanoutdir,"cyto_human_ec5_draws_all.RData"))
-save(ec10_draws_all, file = file.path(stanoutdir,"cyto_human_ec10_draws_all.RData"))
-save(results, file = file.path(stanoutdir,"cyto_human_results_summary.RData"))
-save(r_squared_df, file = file.path(stanoutdir,"cyto_human_r_square.RData"))
+#save(param_draws_all, file = file.path(stanoutdir,"cyto_human_param_draws_all.RData"))
+#save(ec5_draws_all, file = file.path(stanoutdir,"cyto_human_ec5_draws_all.RData"))
+#save(ec10_draws_all, file = file.path(stanoutdir,"cyto_human_ec10_draws_all.RData"))
+#save(results, file = file.path(stanoutdir,"cyto_human_results_summary.RData"))
+#save(r_squared_df, file = file.path(stanoutdir,"cyto_human_r_square.RData"))
+
+save(diagnostics_df, file = file.path(stanoutdir,"cyto_human_diagnostics.RData"))
+
 
 # After sampling and summarizing
 for (i in seq_along(ls_bmd_cyto)) {
@@ -293,7 +331,6 @@ for (i in seq_along(ls_bmd_cyto)) {
   
   check_diagnostics(fit, study_index = i)
 }
-
 
 
 
